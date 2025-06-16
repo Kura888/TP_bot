@@ -32,7 +32,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Уведомление админу
     if ADMIN_ID:
         await context.bot.send_message(
-            chat_id=@ExpertEnergo,
+            chat_id="@ExpertEnergo",
             text=f"👤 @{user.username or user.full_name} начал оформление"
 "{datetime.now().strftime('%d.%m.%Y %H:%M')}"
         )
