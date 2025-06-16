@@ -34,7 +34,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(
             chat_id=ADMIN_ID,
             text=f"👤 @{user.username or user.full_name} начал оформление"
-{datetime.now().strftime('%d.%m.%Y %H:%M')}"
+"{datetime.now().strftime('%d.%m.%Y %H:%M')}"
         )
     return FIO
 
