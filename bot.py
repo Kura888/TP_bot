@@ -1,106 +1,164 @@
-
 import os
-import logging
-from telegram import Update, ReplyKeyboardMarkup, Document
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, filters,
-    ConversationHandler, ContextTypes
-)
-from utils.fill_template import generate_contract_pdf
-import json
 from datetime import datetime
+from aiogram import Bot, Dispatcher, types
+from aiogram.dispatcher import FSMContext
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.utils.executor import start_webhook
+from jinja2 import Template
+import pdfkit
+import tempfile
 
-logging.basicConfig(level=logging.INFO)
+# Конфигурация
+TOKEN = os.getenv('TELEGRAM_TOKEN')
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+EXPERT_CHAT_ID = "@ExpertEnergo"  # Или числовой ID чата
+WEBAPP_HOST = '0.0.0.0'
+WEBAPP_PORT = int(os.getenv('PORT', 8080))
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_ID = 527005102
+bot = Bot(token=TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(bot, storage=storage)
 
-if not TOKEN:
-    raise ValueError("❌ TELEGRAM_BOT_TOKEN не найден.")
+# Шаблон договора (упрощенная версия из вашего файла)
+CONTRACT_TEMPLATE = """
+**Договор возмездного оказания услуг № {{номер}}**
 
-# Состояния
-(FIO, PASSPORT, INN, ADDRESS, PHONE, EMAIL, SERVICE, POWER) = range(8)
+г. Краснодар {{дата}}.
 
-user_data = {}
-with open("pricing.json", "r", encoding="utf-8") as f:
-    pricing = json.load(f)
-services = list(pricing.keys())
+Индивидуальный предприниматель Куропятников Дмитрий Васильевич, ОГРНИП
+324237500097030 от «11» марта 2024 г., выданным Межрайонной инспекцией
+Федеральной налоговой службы № 16 по Краснодарскому краю, именуемый в
+дальнейшем "Исполнитель", с одной стороны, и
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    await update.message.reply_text("Привет! Введите ФИО:")
-    # Уведомление админу
-    if ADMIN_ID:
-        await context.bot.send_message(
-            chat_id="@ExpertEnergo",
-            text=f"👤 @{user.username or user.full_name} начал оформление"
-"{datetime.now().strftime('%d.%m.%Y %H:%M')}"
-        )
-    return FIO
+**{{фио}} {{паспорт}} {{инн}} {{огрн}},** именуемый в
+дальнейшем «Заказчик», с другой стороны, заключили настоящий договор:
 
-async def get_fio(update, context): user_data["ФИО"] = update.message.text; await update.message.reply_text("Паспортные данные:"); return PASSPORT
-async def get_passport(update, context): user_data["ПАСПОРТ"] = update.message.text; await update.message.reply_text("ИНН:"); return INN
-async def get_inn(update, context): user_data["ИНН"] = update.message.text; await update.message.reply_text("Адрес регистрации:"); return ADDRESS
-async def get_address(update, context): user_data["АДРЕС"] = update.message.text; await update.message.reply_text("Телефон:"); return PHONE
-async def get_phone(update, context): user_data["ТЕЛЕФОН"] = update.message.text; await update.message.reply_text("Электронная почта:"); return EMAIL
-async def get_email(update, context):
-    user_data["EMAIL"] = update.message.text
-    markup = ReplyKeyboardMarkup([[s] for s in services], one_time_keyboard=True)
-    await update.message.reply_text("Выберите услугу:", reply_markup=markup)
-    return SERVICE
+1. **Предмет Договора**
+   1. Исполнитель обязуется оказать услугу {{услуга}} до {{мощность}} кВт по адресу {{адрес}}.
+   2. Стоимость услуг: {{стоимость}} рублей.
 
-async def get_service(update, context):
-    service = update.message.text
-    user_data["УСЛУГА"] = service
-    if pricing[service]["type"] == "per_kwt":
-        await update.message.reply_text("Введите мощность (кВт):")
-        return POWER
-    else:
-        user_data["МОЩНОСТЬ"] = ""
-        return await generate_and_send(update, context)
+2. **Реквизиты и подписи Сторон**
 
-async def get_power(update, context):
-    user_data["МОЩНОСТЬ"] = update.message.text
-    return await generate_and_send(update, context)
+Исполнитель:                           Заказчик:
+___________________                    ___________________
+Куропятников Д.В.                      {{фио}}
 
-async def generate_and_send(update, context):
-    file_path = generate_contract_pdf(user_data)
-    await update.message.reply_document(open(file_path, "rb"), filename=os.path.basename(file_path))
-    await update.message.reply_text("Пожалуйста, подпишите PDF и отправьте обратно.")
-    return ConversationHandler.END
+Дата: {{дата}}                         Дата: {{дата}}
+"""
 
-async def receive_signed(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.document:
-        doc: Document = update.message.document
-        file = await doc.get_file()
-        os.makedirs("signed", exist_ok=True)
-        path = f"signed/{doc.file_name}"
-        await file.download_to_drive(path)
-        await context.bot.send_document(chat_id=ADMIN_ID, document=open(path, "rb"),
-                                        caption="📄 Подписанный договор")
-        await update.message.reply_text("Спасибо! Договор отправлен.")
-    else:
-        await update.message.reply_text("Пожалуйста, отправьте PDF.")
+# Состояния для сбора данных
+class FormStates:
+    waiting_for_fio = 1
+    waiting_for_passport = 2
+    waiting_for_inn = 3
+    waiting_for_ogrn = 4
+    waiting_for_service = 5
+    waiting_for_power = 6
+    waiting_for_address = 7
+    waiting_for_price = 8
 
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-    conv = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            FIO: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_fio)],
-            PASSPORT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_passport)],
-            INN: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_inn)],
-            ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_address)],
-            PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_phone)],
-            EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_email)],
-            SERVICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_service)],
-            POWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_power)],
-        },
-        fallbacks=[]
+@dp.message_handler(commands=['start'])
+async def start_command(message: types.Message):
+    await message.answer("Добрый день! Давайте составим договор.\nВведите ваше ФИО:")
+    await FormStates.waiting_for_fio.set()
+
+@dp.message_handler(state=FormStates.waiting_for_fio)
+async def process_fio(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['фио'] = message.text
+    await message.answer("Введите паспортные данные (серия, номер, кем и когда выдан):")
+    await FormStates.waiting_for_passport.set()
+
+@dp.message_handler(state=FormStates.waiting_for_passport)
+async def process_passport(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['паспорт'] = message.text
+    await message.answer("Введите ИНН:")
+    await FormStates.waiting_for_inn.set()
+
+@dp.message_handler(state=FormStates.waiting_for_inn)
+async def process_inn(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['инн'] = message.text
+    await message.answer("Введите ОГРН (если есть):")
+    await FormStates.waiting_for_ogrn.set()
+
+@dp.message_handler(state=FormStates.waiting_for_ogrn)
+async def process_ogrn(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['огрн'] = message.text
+    await message.answer("Опишите услугу (например: 'подготовка документов для ТП'):")
+    await FormStates.waiting_for_service.set()
+
+@dp.message_handler(state=FormStates.waiting_for_service)
+async def process_service(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['услуга'] = message.text
+    await message.answer("Введите мощность (кВт):")
+    await FormStates.waiting_for_power.set()
+
+@dp.message_handler(state=FormStates.waiting_for_power)
+async def process_power(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['мощность'] = message.text
+    await message.answer("Введите адрес объекта:")
+    await FormStates.waiting_for_address.set()
+
+@dp.message_handler(state=FormStates.waiting_for_address)
+async def process_address(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['адрес'] = message.text
+    await message.answer("Введите стоимость услуг (руб):")
+    await FormStates.waiting_for_price.set()
+
+@dp.message_handler(state=FormStates.waiting_for_price)
+async def process_price(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['стоимость'] = message.text
+        data['дата'] = datetime.now().strftime('%d.%m.%Y')
+        data['номер'] = datetime.now().strftime('%d%m%Y%H%M')
+        
+        # Генерация договора
+        template = Template(CONTRACT_TEMPLATE)
+        contract_html = template.render(data)
+        
+        # Создание временного PDF
+        with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as tmp:
+            pdfkit.from_string(contract_html, tmp.name)
+            
+            # Отправка PDF пользователю
+            with open(tmp.name, 'rb') as doc:
+                await message.answer_document(
+                    document=doc,
+                    caption="Ваш договор готов!"
+                )
+            
+            # Отправка PDF эксперту
+            with open(tmp.name, 'rb') as doc:
+                await bot.send_document(
+                    chat_id=EXPERT_CHAT_ID,
+                    document=doc,
+                    caption=f"Новый договор от {data['фио']}\n№{data['номер']}"
+                )
+            
+            os.unlink(tmp.name)
+    
+    await state.finish()
+
+# Настройка вебхуков для Render
+async def on_startup(dp):
+    await bot.set_webhook(WEBHOOK_URL)
+
+async def on_shutdown(dp):
+    await bot.delete_webhook()
+
+if __name__ == '__main__':
+    start_webhook(
+        dispatcher=dp,
+        webhook_path='/webhook',
+        on_startup=on_startup,
+        on_shutdown=on_shutdown,
+        skip_updates=True,
+        host=WEBAPP_HOST,
+        port=WEBAPP_PORT
     )
-    app.add_handler(conv)
-    app.add_handler(MessageHandler(filters.Document.PDF, receive_signed))
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
