@@ -1,0 +1,12 @@
+
+services:
+  - type: web
+    name: tp-bot
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python bot.py"
+    runtime: python
+    region: frankfurt
+    pythonVersion: 3.10.12
+    autoDeploy: true
